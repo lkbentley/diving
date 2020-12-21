@@ -1,0 +1,503 @@
+---
+title: "Diving-Summaries"
+author: "L Bentley"
+date: "31/05/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+##setup and libraries, frst analyses
+library(readr)
+library(tidyverse)
+library(sp)
+library(adehabitatLT)
+library(ggsn)
+
+## Import DIVE DATA
+BBA_GHA_Dive_Events <- read_csv("/Users/lbentley/Dropbox/PhD/Chapters/4. Dive-Depth/Diving_Albatross/Data/BBA_GHA_Dive_Events.csv", 
+                                col_types = cols(StartT = col_datetime(format = "%m/%d/%y %H:%M:%S"), 
+                                                 deepestT = col_datetime(format = "%m/%d/%y %H:%M:%S"), 
+                                                 endT = col_datetime(format = "%m/%d/%y %H:%M:%S")))
+
+BBA_GHA_Dive_Events <- BBA_GHA_Dive_Events %>%
+  separate(ID, c("TDR_no", "dateID", "SPECIES", "Ring"), sep="_")
+
+
+##### okay so the black brows have the date wrong half the time
+BBA_GHA_Dive_Events2 <- BBA_GHA_Dive_Events %>%
+  #filter(SPECIES=="BBA") %>%
+  separate(StartT,c("SYear", "SMonth", "SDay"), sep="-") %>%
+  separate(SDay, c("SDay", "STime"), sep=" ") %>%
+  separate(endT,c("EYear", "EMonth", "EDay"), sep="-") %>%
+  separate(EDay, c("EDay", "ETime"), sep=" ") %>%
+  mutate(S_Date_Fixed = case_when(
+    SMonth == "01" ~ paste(SYear, SMonth, SDay, sep="-"),
+    SMonth != "01" ~ paste(SYear, SDay, SMonth,sep="-")),
+    E_Date_Fixed = case_when(
+    EMonth == "01" ~ paste(SYear, SMonth, SDay, sep="-"),
+    EMonth != "01" ~ paste(SYear, SDay, SMonth,sep="-"))) %>%
+  mutate(S_DateTime = paste(S_Date_Fixed, STime, sep=" "),
+         E_DateTime = paste(E_Date_Fixed, ETime, sep=" "))
+
+
+# Import TRACK DATA
+
+all_gps <- read_csv("/Users/lbentley/Dropbox/PhD/Chapters/4. Dive-Depth/Diving_Albatross/Data/all_gps.csv", col_types = cols(DATE.TIME = col_datetime(format = "%Y-%m-%d %H:%M:%S"), 
+                                                         END.TIME = col_datetime(format = "%Y-%m-%d %H:%M:%S"), 
+                                                         RING = col_character(), START_TIME = col_datetime(format = "%Y-%m-%d %H:%M:%S"), X1 = col_skip()))
+
+# removes 2002 tracks, selects only albatross, fixes the "season" so that it isn't just year
+
+divers_GPS <- all_gps %>%
+  mutate(YEAR=substr(DATE.TIME, 1,4),
+         MONTH=substr(DATE.TIME,6,7)) %>%
+  filter(SPECIES %in% c("BBA", "GHA", "LMSA"), YEAR >2002) %>%
+  mutate(SEASON = ifelse(MONTH=="01", as.numeric(YEAR)-1, YEAR)) %>%
+  filter(RING %in% unique(BBA_GHA_Dive_Events2$Ring))
+
+# one RING has TWO TRACKS
+# 1148440 
+world <- maps::map("world", ".", exact = FALSE, plot = FALSE, fill = TRUE) %>% fortify()
+
+# quick look
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=subset(alb_gps_interp_TDR, TRACKID %in% c("IGOT0010_20100104111500", "IGOT0011_20100106171100")), 
+             aes(long, lat, group=SPECIES), size=0.5, alpha=0.2, color="grey") + 
+  geom_point(data=subset(alb_gps_1sec_TDR_BBA_dive, TRACKID %in% c("IGOT0010_20100104111500", "IGOT0011_20100106171100")), 
+             aes(long, lat, group=SPECIES, color=TRACKID), size=0.75) +
+  theme_bw() +
+  theme(legend.position = "none")
+
+# it's the weird bird, come back to this later with Richard.
+
+# FOR NOW, DROP ONE OUT (The weird pause one) AND GO WITH THE REST
+
+divers_GPS <- divers_GPS %>% filter(TRACKID != "IGOT0011_20100106171100")
+
+# CALCULATE TRIP LENGTHS FOR EACH TRIP THAT HAD DIVES ON IT (ONE PER INDIVIDUAL)
+track_summaries <- divers_GPS %>% group_by(TRACKID) %>%
+  dplyr::select(RING, SPECIES, DEVICEID, START_TIME, END.TIME, SEASON, TRACKID) %>%
+  unique() %>%
+  mutate(trip_length = difftime(END.TIME, START_TIME, units="hours")) %>%
+  mutate(trip_days = difftime(END.TIME, START_TIME, units="days"))
+
+# SPECIES LEVEL SUMMARIES
+spp_track_summaries<-track_summaries %>%
+  group_by(SPECIES) %>%
+  summarise(meantrip = mean(trip_length),
+            sdtrip = sd(as.numeric(trip_length)),
+            maxtrip = max(trip_length),
+            mintrip = min(trip_length),
+            n = n())
+
+# CALCULATE DIVE EVENT CHARACTERISTICS
+
+dive_subset <- BBA_GHA_Dive_Events2 %>%
+  dplyr::select(TDR_no, SPECIES, dateID, Ring, S_DateTime, E_DateTime, deepestT, dur, sur, depth, doubt, note) %>%
+  mutate(dive_ID =row_number()) %>%
+ # filter(Ring!="12543054") %>% ## COME BACK AND FIX THIS ONCE YOU KNOW IF TRACKED
+  #filter(Ring!="1141179") %>%
+ # filter(Ring!="1139185") %>%
+  filter(!doubt>0)
+
+### There are THREE WITH NO GPS TRACKS: "1141179" "12543054" "1139185" ## COME BACK AND FIND THEM (REMOVED ABOVE)
+
+dive_summaries <- dive_subset %>%
+  group_by(SPECIES,Ring) %>%
+  summarise(mean_dur = mean(dur),
+            max_dur = max(dur),
+            min_dur = min(dur),
+            n_dives = n(),
+            time_under = sum(dur),
+            mean_depth = mean(depth),
+            max_depth = max(depth),
+            min_depth = min(depth)
+            )
+  
+## NB The one with like 600 dives is the other track from weird disappearing bird hmmmmm
+
+# SPECIES LEVEL SUMMARIES
+spp_dive_summaries <- dive_summaries %>%
+  group_by(SPECIES) %>%
+  summarise(mean_dur_spp = mean(mean_dur),
+            sd_dur_spp = sd(mean_dur),
+            max_dur_spp = max(max_dur),
+            min_dur_spp = min(min_dur),
+            mean_depth_spp = mean(mean_depth),
+            sd_depth_spp = sd(mean_depth),
+            max_depth_spp = max(max_depth),
+            min_depth_spp = min(min_depth),
+            mean_ndives_spp = mean(n_dives),
+            sd_ndives_spp = sd(n_dives),
+            max_ndives_spp = max(n_dives),
+            min_ndives_spp = min(n_dives),
+            n = n())
+
+
+```
+
+
+
+```{r alldives, include=FALSE}
+
+# analyses on all dives, not just those that could be matched to the GPS tracks. 
+
+# bring in all the dives
+# but you've already fixed the wrong BBA dates -- use this from the first chunk above
+
+BBA_GHA_nodoubt <- BBA_GHA_Dive_Events2 %>%
+  dplyr::select(TDR_no, SPECIES, dateID, Ring, S_DateTime, E_DateTime, deepestT, dur, sur, depth, doubt, note) %>%
+  mutate(dive_ID = row_number()) %>%
+  filter(!doubt>0) %>%
+  dplyr::select(TDR_no, SPECIES, Ring, S_DateTime, E_DateTime,deepestT, dur, sur, depth, doubt, dive_ID)
+
+# bring in dive data from LMSA
+LMSA_Dives <- read_csv("/Users/lbentley/Dropbox/PhD/Chapters/4. Dive-Depth/Diving_Albatross/Data/LMSA/LMSA_Dives.csv", 
+                       col_types = cols(StartT = col_datetime(format = "%m/%d/%y %H:%M:%S"), 
+                                        deepestT = col_datetime(format = "%m/%d/%y %H:%M:%S"), 
+                                        endT = col_datetime(format = "%m/%d/%y %H:%M:%S")))
+# create unique nest column
+LMSA_Dives_nodoubt <- LMSA_Dives %>%
+  separate(ID, into=c("TDR", "SPECIES", "Nest", "Day", "Month", "Year")) %>%
+  mutate(Nest = gsub("[a-zA-Z ]", "", Nest)) %>%
+  mutate(Nest = as.character((Nest))) %>%
+  rename(TDR_no = TDR,
+         S_DateTime = StartT,
+         E_DateTime = endT,
+         Ring = Nest) %>%
+  filter(!doubt>0) %>%
+  mutate(dive_ID =row_number()) %>%
+  dplyr::select(TDR_no, SPECIES, Ring, S_DateTime, E_DateTime,deepestT, dur, sur, depth, doubt, dive_ID)
+
+BBA_GHA_nodoubt$S_DateTime <- as.POSIXct(BBA_GHA_nodoubt$S_DateTime, format="%Y-%m-%d %H:%M:%S")
+
+alldives_combined <- rbind(BBA_GHA_nodoubt, LMSA_Dives_nodoubt) 
+
+all_dive_summaries <- alldives_combined %>%
+  group_by(SPECIES,Ring) %>%
+  summarise(mean_dur = mean(dur),
+            max_dur = max(dur),
+            min_dur = min(dur),
+            n_dives = n(),
+            time_under = sum(dur),
+            mean_depth = mean(depth),
+            max_depth = max(depth),
+            min_depth = min(depth)
+            ) %>%
+  mutate(diver=T)
+  
+## add in the individuals who were tracked but had NO DIVES RECORDED: 
+## your start/end times are no good for LMSA but ok for others, need to fix format if you want to use this later
+
+no_dive_IDs <- read_csv("/Users/lbentley/Dropbox/PhD/Chapters/4. Dive-Depth/Diving_Albatross/Data/no-dive-IDs.csv")
+
+no_dive_IDs_merge <- no_dive_IDs %>%
+  dplyr::select(SPECIES, Ring, nDives) %>%
+  mutate(Ring = as.character(Ring)) %>%
+  mutate(mean_dur=NA,
+         max_dur=NA,
+         min_dur=NA, 
+         n_dives=nDives,
+         time_under=NA,
+         mean_depth=NA,
+         max_depth=NA,
+         min_depth=NA) %>%
+  dplyr::select(-nDives) %>%
+  mutate(diver=F)
+
+all_dive_summaries_nondivers <- bind_rows(all_dive_summaries, no_dive_IDs_merge)
+
+
+# SPECIES LEVEL SUMMARIES
+spp_dive_summaries_complete <- all_dive_summaries_nondivers %>%
+  filter(diver==T) %>%
+  group_by(SPECIES) %>%
+  summarise(mean_dur_spp = mean(mean_dur,na.rm=TRUE),
+            sd_dur_spp = sd(mean_dur,na.rm=TRUE),
+            max_dur_spp = max(max_dur, na.rm=TRUE),
+            min_dur_spp = min(min_dur, na.rm=TRUE),
+            mean_depth_spp = mean(mean_depth, na.rm=TRUE),
+            sd_depth_spp = sd(mean_depth, na.rm=TRUE),
+            max_depth_spp = max(max_depth, na.rm=TRUE),
+            min_depth_spp = min(min_depth, na.rm=TRUE),
+            mean_ndives_spp = mean(n_dives, na.rm=TRUE),
+            sd_ndives_spp = sd(n_dives, na.rm=TRUE),
+            max_ndives_spp = max(n_dives, na.rm=TRUE),
+            min_ndives_spp = min(n_dives, na.rm=TRUE),
+            n = n())
+
+
+```
+
+
+```{r track_match, include=FALSE}
+
+# extract key info from birds w TDRs (divers and non divers) to match w trackID
+
+diver_ids <- all_dive_summaries_nondivers %>%
+  dplyr::select(SPECIES, Ring) %>% 
+  rename(RING=Ring) %>%
+  group_by(RING) 
+
+
+alb_GPS_IDs <- alb_GPS %>%
+  dplyr::select(-DATE.TIME, -LON, -LAT) %>%
+  unique()
+
+matched_IDs <- diver_ids %>%
+  left_join(alb_GPS_IDs, by = c("SPECIES", "RING")) %>%
+  filter(SPECIES!="LMSA")
+
+# extract just the tracks for birds with TDRs
+
+divers_BBAGHA_GPS <- alb_GPS %>%
+  filter(TRACKID %in% matched_IDs$TRACKID)
+
+## interpolates tracks to 5 minute intervals
+tointerp <- divers_BBAGHA_GPS
+tointerp <- tointerp %>%
+  mutate(Species_track_stage_season_ring = paste(TRACKID, SPECIES,STAGE, SEASON, RING, sep="-"))
+
+id <- tointerp[,13]
+
+tointerp <- tointerp[-which(duplicated(paste(tointerp$DATE.TIME, id))),]
+
+loc <- coordinates(as.matrix(tointerp[,c(6,7)], nrow=length(tointerp)))
+
+alb_GPSltraj <- as.ltraj(xy=loc, 
+                       id=tointerp$Species_track_stage_season_ring, date=tointerp$DATE.TIME,
+                       typeII=T)
+
+interp <- redisltraj(l=alb_GPSltraj, u=300, type="time")
+
+# converts back to DF
+df_interp <- ld(interp)
+
+# selects columns required and merges back
+df_interpm <- df_interp %>%
+  dplyr::select(long=x,lat=y,DATETIME=date, Species_track_stage_season_ring=id)
+
+# separates out extra information again
+divers_gps_interp <- df_interpm %>%
+  separate(col=Species_track_stage_season_ring, into = c("TRACKID", "SPECIES", "STAGE", "SEASON", "RING"), sep="-") %>%
+  filter(DATETIME<"2011-01-01")
+
+# quick plot of the extracted tracks
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=divers_gps_interp, aes(long, lat, group=SPECIES, color=SPECIES), size=0.5) + 
+  theme_bw() +
+  facet_wrap(~SPECIES) +
+  theme(legend.position="bottom") 
+
+# do the dive events line up onto the tracks? 
+library(wesanderson)
+palGHA <- wes_palette("Zissou1", (length(unique(subset(divers_gps_interp, SPECIES=="GHA")$TRACKID))), type = "continuous")
+palBBA <- wes_palette("Zissou1", (length(unique(subset(divers_gps_interp, SPECIES=="BBA")$TRACKID))), type = "continuous")
+
+palSPE <- wes_palette("Zissou1", 2, type = "continuous")
+pal5 <- wes_palette("Zissou1", 5, type = "continuous")
+pal7 <- wes_palette("Zissou1", 7, type = "continuous")
+
+# yes, species by species first GHA
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=subset(divers_gps_interp, SPECIES=="GHA"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=0.7, alpha=0.1) + 
+  geom_point(data=subset(dive_2sec, SPECIES=="GHA"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=1.7, alpha=0.5) + 
+  scale_color_manual(values = palGHA) +
+  theme_bw(base_family="Hoefler Text") +
+  ggtitle("2009, GHA, Brood Guard")  +
+  theme(legend.position = "right") 
+
+
+# now BBA
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=subset(divers_gps_interp, SPECIES=="BBA" & TRACKID !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=0.7, alpha=0.1) + 
+  geom_point(data=subset(alb_gps_1sec_TDR_BBA_dive, TRACKID !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=1.7, alpha=0.5) +
+ scale_color_manual(values = palBBA) +
+    theme_bw(base_family="Hoefler Text") +
+
+  ggtitle("2009, BBA, Brood Guard") +
+  theme(legend.position = "right") 
+
+## greyed out tracks to emphasise dive points
+# yes, species by species first GHA
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=subset(divers_gps_interp, SPECIES=="GHA"), 
+             aes(long, lat, group=TRACKID), size=0.7, alpha=0.1, color="grey") + 
+  geom_point(data=subset(dive_2sec, SPECIES=="GHA"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=1.7, alpha=0.5) + 
+  scale_color_manual(values = palGHA) +
+  theme_bw(base_family="Hoefler Text") +
+  ggtitle("2009, GHA, Brood Guard")  +
+  theme(legend.position = "right") 
+
+
+# now BBA
+ggplot(world, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+  geom_point(data=subset(divers_gps_interp, SPECIES=="BBA" & TRACKID !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID), size=0.7, alpha=0.1, color="grey") + 
+  geom_point(data=subset(alb_gps_1sec_TDR_BBA_dive, TRACKID !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID, color=TRACKID), size=1.7, alpha=0.5) +
+ scale_color_manual(values = palBBA) +
+    theme_bw(base_family="Hoefler Text") +
+  ggtitle("2009, BBA, Brood Guard") +
+  theme(legend.position = "right") 
+
+
+souths <- c("South Georgia", "South Sandwich Islands")
+sthgeo <- subset(world,  region %in% souths)
+
+# trying for scale bars
+ggplot(sthgeo, aes(x=long, y=lat, group=group)) +
+  geom_path() + 
+  coord_map("azequalarea", orientation=c(-55, -45, 0),xlim=c(-34, -48), ylim=c(-44,-57)) +
+ # scalebar(sthgeo, dist = 100, st.size=3, height=0.01, model = 'WGS84') +
+  geom_point(data=subset(divers_gps_interp, TRACKID !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID, color=SPECIES), size=0.7, alpha=0.1) + 
+  geom_point(data=subset(alb_gps_1sec_TDR_BBA_dive, SPECIES !="IGOT0011_20100106171100"), 
+             aes(long, lat, group=TRACKID, color=SPECIES), size=1.7, alpha=0.5) +
+    geom_point(data=subset(GHA_gps_1sec_dive_true, SPECIES=="GHA"), 
+             aes(long, lat, group=TRACKID, color=SPECIES), size=1.7, alpha=0.5) +
+   scale_color_manual(values = palSPE) +
+  theme_bw() +
+  ggtitle("2009, BBA/GHA, Brood Guard") +
+  theme(legend.position = "right") 
+
+
+
+
+```
+
+
+```{r timeplots, include=FALSE}
+
+alldives_combined %>%
+  mutate(Hour = substr(S_DateTime, 12,13)) %>%
+  filter(!SPECIES=="LMSA") %>%
+  ggplot(aes(Hour,fill=SPECIES)) +
+  geom_bar(position = position_dodge2(width = 2, preserve = "single")) +
+  #scale_fill_manual(values = palSPE) +
+  theme_bw(base_family="Hoefler Text") 
+
+alldives_combined %>%
+  mutate(Hour = substr(S_DateTime, 12,13)) %>%
+  filter(!SPECIES=="LMSA") %>%
+  ggplot(aes(Hour,fill=SPECIES)) +
+  geom_bar(position = position_dodge2(width = 2, preserve = "single")) +
+  theme_bw(base_family="Hoefler Text") +
+  facet_wrap(~Ring) 
+
+alldives_combined %>%
+  mutate(Date = substr(S_DateTime, 1,10)) %>%
+  ggplot(aes(Date,fill=SPECIES)) +
+  geom_bar(position = position_dodge2(width = 2, preserve = "single")) +
+  theme_bw()+
+  theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+library(SGAT)
+
+day_night <- function(date, lon, lat, zenith = 96, verbose = TRUE){
+  if(is.character(date)){
+    date <- as.POSIXct(date, tz = 'GMT')
+  }
+  if(verbose){cat('\nSolar zenith angle = ', 
+      paste(round(zenith(solar(date), lon, lat),3), collapse = ', '),'\n')}
+  ifelse(zenith(solar(date), lon, lat) > zenith, 'night', 'day')
+}
+
+daynight<-day_night(GHA_gps_1sec_dive_true$DATETIME, GHA_gps_1sec_dive_true$long, GHA_gps_1sec_dive_true$lat, zenith=96, verbose=TRUE)
+
+
+# just take the zeniths as they're all daytime
+zeniths <- zenith(solar(GHA_gps_1sec_dive_true$DATETIME), GHA_gps_1sec_dive_true$long, GHA_gps_1sec_dive_true$lat)
+# the zenith angle is the angle from straight above the bird to the sun, so if it's at the horizon it's 90, if the sun is directly overhead it's 0
+
+GHA_gps_1sec_dive_true$zenith<- zeniths
+
+GHA_gps_1sec_dive_true %>%
+  #mutate(Hour = substr(DATETIME, 12,13)) %>%
+ #filter(!SPECIES=="LMSA") %>%
+  ggplot(aes(zeniths,  fill=SPECIES)) +
+  geom_histogram(binwidth=5) +
+  scale_fill_manual(values = palSPE) +
+  facet_wrap(~RING)
+  #theme_bw(base_family="Hoefler Text") 
+  
+  ### BBA
+
+zenithsBBA <- zenith(solar(alb_gps_1sec_TDR_BBA_dive$DATETIME), alb_gps_1sec_TDR_BBA_dive$long, alb_gps_1sec_TDR_BBA_dive$lat)
+# the zenith angle is the angle from straight above the bird to the sun, so if it's at the horizon it's 90, if the sun is directly overhead it's 0
+
+alb_gps_1sec_TDR_BBA_dive$zenith<- zenithsBBA
+
+alb_gps_1sec_TDR_BBA_dive %>%
+  #mutate(Hour = substr(DATETIME, 12,13)) %>%
+ #filter(!SPECIES=="LMSA") %>%
+  ggplot(aes(zenith,  fill=SPECIES)) +
+  geom_histogram(binwidth=5) +
+  scale_fill_manual(values = palSPE) +
+  facet_wrap(~RING)
+  #theme_bw(base_family="Hoefler Text") 
+
+
+
+### combine and plot together
+alldivesT_GPS1sec_GHABBA <- rbind(GHA_gps_1sec_dive_true,alb_gps_1sec_TDR_BBA_dive)
+
+alldivesT_GPS1sec_GHABBA %>%
+  #mutate(Hour = substr(DATETIME, 12,13)) %>%
+ #filter(!SPECIES=="LMSA") %>%
+  ggplot(aes(zenith,  fill=SPECIES)) +
+  geom_histogram(binwidth=5) +
+  scale_fill_manual(values = palSPE) +
+  facet_wrap(~RING)
+  #theme_bw(base_family="Hoefler Text") 
+
+## all dive events,  split by individiual
+alldivesT_GPS1sec_GHABBA %>%
+  mutate(RING=as.character(RING))%>%
+  ggplot(aes(zenith, color= RING)) +
+  geom_freqpoly(breaks=seq(20, 100, by=10), alpha=0.5) +
+  #scale_color_discrete(values = palSPE) +
+  theme_bw() +
+  facet_wrap(~SPECIES)+
+  ylab("Seconds Diving") +
+  xlab("Solar Zenith at Dive Location")
+  #theme_bw(base_family="Hoefler Text") 
+
+
+alldivesT_GPS1sec_GHABBA %>%
+  mutate(RING=as.character(RING))%>%
+  ggplot(aes(DATETIME, fill=SPECIES)) +
+  #geom_freqpoly(breaks=seq(20, 100, by=10), alpha=0.5) +
+  geom_histogram(bins=60)+
+  #scale_color_discrete(values = palSPE) +
+  theme(axis.text.x = element_text(angle = 90)) +
+  facet_wrap(~RING)+
+  ylab("Seconds Diving") +
+  xlab("Time (GMT)")
+  #theme_bw(base_family="Hoefler Text") 
+
+```
+
+```
+
+```
+
+
